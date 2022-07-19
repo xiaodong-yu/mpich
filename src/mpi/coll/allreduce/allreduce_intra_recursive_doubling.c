@@ -4,6 +4,7 @@
  */
 
 #include "mpiimpl.h"
+#include <time.h>
 
 /*
  * Algorithm: Recursive Doubling
@@ -37,16 +38,22 @@ int MPIR_Allreduce_intra_recursive_doubling(const void *sendbuf,
 
     is_commutative = MPIR_Op_is_commutative(op);
 
+    clock_t before = clock();
     /* need to allocate temporary buffer to store incoming data */
     MPIR_Type_get_true_extent_impl(datatype, &true_lb, &true_extent);
     MPIR_Datatype_get_extent_macro(datatype, extent);
 
-    MPIR_CHKLMEM_MALLOC(tmp_buf, void *, count * (MPL_MAX(extent, true_extent)), mpi_errno,
-                        "temporary buffer", MPL_MEM_BUFFER);
+    //MPIR_CHKLMEM_MALLOC(tmp_buf, void *, count * (MPL_MAX(extent, true_extent)), mpi_errno,
+    //                    "temporary buffer", MPL_MEM_BUFFER);
 
-    /* adjust for potential negative lower bound in datatype */
-    tmp_buf = (void *) ((char *) tmp_buf - true_lb);
+    ///* adjust for potential negative lower bound in datatype */
+    //tmp_buf = (void *) ((char *) tmp_buf - true_lb);
+    cudaMalloc((void**)&tmp_buf, count * (MPL_MAX(extent, true_extent)));
+    clock_t difference = clock() - before;
+    double usec = difference * 1000000 / CLOCKS_PER_SEC;
+    printf("buffer create time: %f\n", usec);
 
+    before = clock();
     /* copy local data into recvbuf */
     if (sendbuf != MPI_IN_PLACE) {
         mpi_errno = MPIR_Localcopy(sendbuf, count, datatype, recvbuf, count, datatype);
@@ -57,6 +64,9 @@ int MPIR_Allreduce_intra_recursive_doubling(const void *sendbuf,
     pof2 = comm_ptr->coll.pof2;
 
     rem = comm_size - pof2;
+    difference = clock() - before;
+    usec = difference * 1000000 / CLOCKS_PER_SEC;
+    printf("buffer copy time: %f\n", usec);
 
     /* In the non-power-of-two case, all even-numbered
      * processes of rank < 2*rem send their data to
@@ -115,10 +125,12 @@ int MPIR_Allreduce_intra_recursive_doubling(const void *sendbuf,
      * datatypes to do the reduce-scatter is tricky, therefore
      * using recursive doubling in that case.) */
 
+    double com = 0, cal=0;
     if (newrank != -1) {
         mask = 0x1;
         while (mask < pof2) {
             newdst = newrank ^ mask;
+            before = clock();
             /* find real rank of dest */
             dst = (newdst < rem) ? newdst * 2 + 1 : newdst + rem;
 
@@ -136,10 +148,13 @@ int MPIR_Allreduce_intra_recursive_doubling(const void *sendbuf,
                 MPIR_ERR_SET(mpi_errno, *errflag, "**fail");
                 MPIR_ERR_ADD(mpi_errno_ret, mpi_errno);
             }
+            difference = clock() - before;
+            com += difference * 1000000 / CLOCKS_PER_SEC;
 
             /* tmp_buf contains data received in this step.
              * recvbuf contains data accumulated so far */
 
+            before = clock();
             if (is_commutative || (dst < rank)) {
                 /* op is commutative OR the order is already right */
                 mpi_errno = MPIR_Reduce_local(tmp_buf, recvbuf, count, datatype, op);
@@ -154,8 +169,11 @@ int MPIR_Allreduce_intra_recursive_doubling(const void *sendbuf,
                 MPIR_ERR_CHECK(mpi_errno);
             }
             mask <<= 1;
+            difference = clock() - before;
+            cal += difference * 1000000 / CLOCKS_PER_SEC;
         }
     }
+    printf("comm time: %f; cal time: %f\n", com, cal);
     /* In the non-power-of-two case, all odd-numbered
      * processes of rank < 2*rem send the result to
      * (rank-1), the ranks who didn't participate above. */
